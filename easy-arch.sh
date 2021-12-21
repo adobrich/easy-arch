@@ -283,6 +283,11 @@ print "Generating a new fstab."
 genfstab -U /mnt >> /mnt/etc/fstab
 
 # Strip subvolume id for root to allow booting of alternate shapshots
+print "For now manually remove the id from the fstab"
+
+# Update grub to look for the kernel in the snapshots subvolume
+sed -i 's#rootflags=subvol=${rootsubvol}##g' /mnt/etc/grub.d/10_linux
+sed -i 's#rootflags=subvol=${rootsubvol}##g' /mnt/etc/grub.d/20_linux_xen
 
 # Setting username.
 read -r -p "Please enter name for a user account (enter empty to not create one): " username
@@ -304,14 +309,9 @@ EOF
 # Configuring /etc/mkinitcpio.conf.
 print "Configuring /etc/mkinitcpio.conf."
 cat > /mnt/etc/mkinitcpio.conf <<EOF
-HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt filesystems)
+HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block filesystems)
 COMPRESSION=(zstd)
 EOF
-
-# Setting up LUKS2 encryption in grub.
-print "Setting up grub config."
-UUID=$(blkid -s UUID -o value $CRYPTROOT)
-sed -i "s,quiet,quiet rd.luks.name=$UUID=cryptroot root=$BTRFS,g" /mnt/etc/default/grub
 
 # Configuring the system.    
 arch-chroot /mnt /bin/bash -e <<EOF
@@ -344,7 +344,7 @@ arch-chroot /mnt /bin/bash -e <<EOF
     
     # Installing GRUB.
     echo "Installing GRUB on /boot."
-    grub-install --target=x86_64-efi --efi-directory=/boot/ --bootloader-id=GRUB &>/dev/null
+    grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB --modules="normal test efi_gop efi_uga search echo linux all_video gfxmenu gfxterm_background gfxterm_menu gfxterm loadenv configfile gzio part_gpt btrfs" &>/dev/null
 
     # Creating grub config file.
     echo "Creating GRUB config file."
@@ -365,24 +365,6 @@ if [ -n "$username" ]; then
     arch-chroot /mnt /bin/passwd "$username"
 fi
 
-# Boot backup hook.
-print "Configuring /boot backup when pacman transactions are made."
-mkdir /mnt/etc/pacman.d/hooks
-cat > /mnt/etc/pacman.d/hooks/50-bootbackup.hook <<EOF
-[Trigger]
-Operation = Upgrade
-Operation = Install
-Operation = Remove
-Type = Path
-Target = usr/lib/modules/*/vmlinuz
-
-[Action]
-Depends = rsync
-Description = Backing up /boot...
-When = PostTransaction
-Exec = /usr/bin/rsync -a --delete /boot /.bootbackup
-EOF
-
 # ZRAM configuration.
 print "Configuring ZRAM."
 cat > /mnt/etc/systemd/zram-generator.conf <<EOF
@@ -397,7 +379,7 @@ sed -i 's/#Colors/Colors\nILoveCandy/' /mnt/etc/pacman.conf
 
 # Enabling various services.
 print "Enabling Reflector, automatic snapshots, BTRFS scrubbing and systemd-oomd."
-for service in reflector.timer snapper-timeline.timer snapper-cleanup.timer btrfs-scrub@-.timer btrfs-scrub@home.timer btrfs-scrub@var-log.timer btrfs-scrub@\\x2esnapshots.timer grub-btrfs.path systemd-oomd
+for service in (NetworkManager,bluetooth,sddm)
 do
     systemctl enable "$service" --root=/mnt &>/dev/null
 done
