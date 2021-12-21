@@ -102,18 +102,6 @@ network_selector () {
     esac
 }
 
-# Setting up a password for the LUKS Container (function).
-password_selector () {
-    read -r -s -p "Insert password for the LUKS container (you're not going to see the password): " password
-    if [ -z "$password" ]; then
-        print "You need to enter a password for the LUKS Container in order to continue."
-        password_selector
-    fi
-    echo -n "$password" | cryptsetup luksFormat "$CRYPTROOT" -d -
-    echo -n "$password" | cryptsetup open "$CRYPTROOT" cryptroot -d -
-    BTRFS="/dev/mapper/cryptroot"
-}
-
 # Microcode detector (function).
 microcode_detector () {
     CPU=$(grep vendor_id /proc/cpuinfo)
@@ -138,13 +126,19 @@ hostname_selector () {
 
 # Setting up the locale (function).
 locale_selector () {
-    read -r -p "Please insert the locale you use (format: xx_XX or enter empty to use en_US): " locale
+    read -r -p "Please insert the locale you use (format: xx_XX or leave blank to use en_US): " locale
     if [ -z "$locale" ]; then
         print "en_US will be used as default locale."
         locale="en_US"
     fi
+    read -r -p "Please insert the language and fallback languages to use (format: xx_XX:xx_XX or leave blank to use US English): " language
+    if [ -z "$locale" ]; then
+        print "US English will be used as default language."
+        language="en"
+    fi
     echo "$locale.UTF-8 UTF-8"  > /mnt/etc/locale.gen
     echo "LANG=$locale.UTF-8" > /mnt/etc/locale.conf
+    echo "LANGUAGE=$language" > /mnt/etc/locale.conf
 }
 
 # Setting up the keyboard layout (function).
@@ -185,10 +179,10 @@ parted -s "$DISK" \
     mklabel gpt \
     mkpart ESP fat32 1MiB 513MiB \
     set 1 esp on \
-    mkpart CRYPTROOT 513MiB 100% \
+    mkpart root 513MiB 100% \
 
 ESP="/dev/disk/by-partlabel/ESP"
-CRYPTROOT="/dev/disk/by-partlabel/CRYPTROOT"
+ROOT="/dev/disk/by-partlabel/root"
 
 # Informing the Kernel of the changes.
 print "Informing the Kernel about the disk changes."
@@ -198,33 +192,72 @@ partprobe "$DISK"
 print "Formatting the EFI Partition as FAT32."
 mkfs.fat -F 32 $ESP &>/dev/null
 
-# Creating a LUKS Container for the root partition.
-print "Creating LUKS Container for the root partition."
-password_selector
-
 # Formatting the LUKS Container as BTRFS.
-print "Formatting the LUKS container as BTRFS."
-mkfs.btrfs $BTRFS &>/dev/null
+print "Formatting root as BTRFS."
+mkfs.btrfs -L root -n 32k $BTRFS &>/dev/null
 mount $BTRFS /mnt
 
 # Creating BTRFS subvolumes.
 print "Creating BTRFS subvolumes."
-for volume in @ @home @snapshots @var_log @var_pkgs
-do
-    btrfs su cr /mnt/$volume
-done
+btrfs su cr /mnt/@ &>/dev/null
+btrfs su cr /mnt/@/.snapshots &>/dev/null
+mkdir -p /mnt/@/.snapshots/1
+btrfs su cr /mnt/@/.snapshots/1/snapshot
+mkdir /mnt/@/boot
+btrfs su cr /mnt/@/boot/grub
+btrfs su cr /mnt/@/home
+btrfs su cr /mnt/@/root
+btrfs su cr /mnt/@/opt
+btrfs su cr /mnt/@/srv
+btrfs su cr /mnt/@/tmp
+mkdir /mnt/@/usr
+btrfs su cr /mnt/@/usr/local
+mkdir /mnt/@/var
+btrfs su cr /mnt/@/var/cache
+btrfs su cr /mnt/@/var/log
+btrfs su cr /mnt/@/var/spool
+btrfs su cr /mnt/@/var/tmp
+
+# Creating initial snapper snapshot info
+date_now=$(date +"%Y-%m-%d %T)
+cat << EOF >> /mnt/@/.snapshots/1/info.xml
+<?xml version="1.0"?>
+<snapshot>
+	<type>single</type>
+	<num>1</num>
+	<date>$date_now</date>
+	<description>First Root Filesystem Created at Installation</description>
+</snapshot>
+EOF
+
+chmod 600 /mnt/@/.snapshots/1/info.xml
+
+# Set inital snapshot as default subvolume
+btrfs subvolume set-default $(btrfs subvolume list /mnt | grep "@/.snapshots/1/snapshot" | grep -oP '(?<=ID )[0-9]+') /mnt
+
+chattr +C /mnt/@/var/cache
+chattr +C /mnt/@/var/log
+chattr +C /mnt/@/var/spool
+chattr +C /mnt/@/var/tmp
 
 # Mounting the newly created subvolumes.
 umount /mnt
 print "Mounting the newly created subvolumes."
-mount -o ssd,noatime,compress-force=zstd:3,discard=async,subvol=@ $BTRFS /mnt
-mkdir -p /mnt/{home,.snapshots,/var/log,/var/cache/pacman/pkg,boot}
-mount -o ssd,noatime,compress-force=zstd:3,discard=async,subvol=@home $BTRFS /mnt/home
-mount -o ssd,noatime,compress-force=zstd:3,discard=async,subvol=@snapshots $BTRFS /mnt/.snapshots
-mount -o ssd,noatime,compress-force=zstd:3,discard=async,subvol=@var_log $BTRFS /mnt/var/log
-mount -o ssd,noatime,compress-force=zstd:3,discard=async,subvol=@var_pkgs $BTRFS /mnt/var/cache/pacman/pkg
-chattr +C /mnt/var/log
-mount $ESP /mnt/boot/
+mount -o noatime,compress=zstd:8,discard=async $BTRFS /mnt
+mkdir -p /mnt/{boot/grub,efi,root,home,.snapshots,srv,tmp,opt,var/log,var/cache,var/tmp,var/spool}
+mount -o noatime,compress=zstd:8,discard=async,subvol=@/.snapshots $BTRFS /mnt/.snapshots
+mount -o noatime,compress=zstd:8,discard=async,subvol=@/boot/grub $BTRFS /mnt/boot/grub
+mount -o noatime,compress=zstd:8,discard=async,subvol=@/opt $BTRFS /mnt/opt
+mount -o noatime,compress=zstd:8,discard=async,subvol=@/root $BTRFS /mnt/root
+mount -o noatime,compress=zstd:8,discard=async,subvol=@/home $BTRFS /mnt/home
+mount -o noatime,compress=zstd:8,discard=async,subvol=@/srv $BTRFS /mnt/srv
+mount -o noatime,compress=zstd:8,discard=async,subvol=@/tmp $BTRFS /mnt/tmp
+mount -o noatime,compress=zstd:8,discard=async,subvol=@/usr/local $BTRFS /mnt/usr/local
+mount -o noatime,compress=zstd:8,discard=async,nodatacow,subvol=@/var/cache $BTRFS /mnt/var/cache
+mount -o noatime,compress=zstd:8,discard=async,nodatacow,subvol=@/var/log $BTRFS /mnt/var/log
+mount -o noatime,compress=zstd:8,discard=async,nodatacow,subvol=@/var/spool $BTRFS /mnt/var/spool
+mount -o noatime,compress=zstd:8,discard=async,nodatacow,subvol=@/var/tmp $BTRFS /mnt/var/tmp
+mount $ESP /mnt/efi
 
 # Setting up the kernel.
 kernel_selector
@@ -240,7 +273,7 @@ network_selector
 
 # Pacstrap (setting up a base sytem onto the new root).
 print "Installing the base system (it may take a while)."
-pacstrap /mnt base $kernel $microcode linux-firmware $kernel-headers btrfs-progs grub grub-btrfs rsync efibootmgr snapper reflector base-devel snap-pac zram-generator
+pacstrap /mnt base $kernel $microcode linux-firmware $kernel-headers btrfs-progs grub grub-btrfs rsync efibootmgr snapper reflector base-devel snap-pac zram-generator sudo neovim efibootmgr xorg-server xorg-apps plasma-meta kde-utilities kde-system dolphin-plugins kde-graphics fish git man-db man-pages texinfo
 
 # Setting up the hostname.
 hostname_selector
@@ -248,6 +281,8 @@ hostname_selector
 # Generating /etc/fstab.
 print "Generating a new fstab."
 genfstab -U /mnt >> /mnt/etc/fstab
+
+# Strip subvolume id for root to allow booting of alternate shapshots
 
 # Setting username.
 read -r -p "Please enter name for a user account (enter empty to not create one): " username
