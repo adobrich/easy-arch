@@ -60,7 +60,7 @@ virt_check () {
             ;;
     esac
 }
-virt_check
+
 # Selecting a kernel to install (function).
 kernel_selector () {
     print "info" "List of kernels:"
@@ -152,11 +152,15 @@ locale_selector () {
         print "info" "en_US will be used as default locale."
         locale="en_US"
     fi
-    print "input" "Please insert the language and fallback languages to use (format: xx_XX:xx_XX or leave blank to use US English): "
+
+    # Split locales
+    IFS=' ' read -ra lang_array <<< $locale
+
+    print "input" "Please insert the language and fallback languages to use (format: xx_XX:xx_XX or leave blank to use ${lang_array[0]}): "
     read -r language
     if [ -z "$language" ]; then
-        print "info" "US English will be used as default language."
-        language="en"
+        print "info" "${lang_array[0]} will be used as default language."
+        language="${lang_array[0]}"
     fi
     # Clear contents of /mnt/etc/locale.gen
     execute "truncate -s 0 /mnt/etc/locale.gen" "clear contents of existing /mnt/etc/locale.gen"
@@ -165,7 +169,6 @@ locale_selector () {
         execute "echo $entry.UTF-8 UTF-8 >> /mnt/etc/locale.gen" "write locale ($entry) to /mnt/etc/locale.gen"
     done
     # Set primary locale in (first in list) /mnt/etc/locale.conf
-    IFS=' ' read -ra lang_array <<< $locale
     execute "echo LANG=${lang_array[0]}.UTF-8 >> /mnt/etc/locale.conf" "write locale to /mnt/etc/locale.conf"
     execute "echo "LANGUAGE=$language" >> /mnt/etc/locale.conf" "write language to /mnt/etc/locale.conf"
 }
@@ -457,8 +460,7 @@ print "blue" "Otherwise reboot to srtart using the newly installed system."
 
 # TODO: supplementary scripts?
 # kde / gnome / sway etc.
-# neovim + config
-# rust / lsp
+# neovim + config etc.
 for script in "./post_install_scripts/"*.sh
 do
 	sh "$script" &
